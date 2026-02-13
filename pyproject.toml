@@ -1,0 +1,24 @@
+[project]
+name = "e2e-planner"
+version = "0.1.0"
+description = "End-to-end motion planner for autonomous vehicles"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=2.0",
+    "Pillow>=10.0",
+    # pandas 3.0 enables Copy-on-Write by default, which breaks
+    # physical_ai_av's EgomotionState.from_egomotion_df (read-only arrays
+    # from pd.read_parquet passed to scipy Rotation.from_quat).
+    "pandas<3",
+    "physical_ai_av>=0.1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["data*", "models*"]
+
+[project.optional-dependencies]
+dev = [
+    "matplotlib>=3.8",
+    "tensorboard>=2.14",
+]

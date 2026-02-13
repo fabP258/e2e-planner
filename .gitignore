@@ -1,0 +1,10 @@
+/.claude
+/.vscode
+/__pycache__
+/checkpoints
+/e2e_planner.egg-info
+/runs
+/test_dataset.py
+/test_dataset_sample.png
+/test_dataset_samples
+/test_model.py
