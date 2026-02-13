@@ -33,9 +33,26 @@ This loads chunk 0 and saves sample visualizations to `test_dataset_samples/`.
 
 ## Training
 
+Single GPU:
+
 ```bash
-python train.py --nvidia-drive --chunk-ids 0 1 2
+python train.py --chunk-ids 0 1 2 --model-size medium --batch-size 8
 ```
+
+### Multi-GPU (DDP)
+
+The training script supports multi-GPU training via PyTorch
+DistributedDataParallel. Use `torchrun` to launch:
+
+```bash
+torchrun --nproc_per_node=2 train.py --chunk-ids 0 1 2 --model-size medium --batch-size 8
+```
+
+`--nproc_per_node` is the number of GPUs on the machine. The `--batch-size` is
+per GPU, so the example above gives an effective batch size of 16.
+
+Epoch-level losses are averaged across all GPUs via `all_reduce` before logging.
+Checkpoints and TensorBoard events are written by the rank 0 process only.
 
 See `python train.py --help` for all options.
 
@@ -50,7 +67,7 @@ tensorboard --logdir runs
 
 Open `http://localhost:6006` to view:
 
-- **Scalars**: `train/loss_step`, `train/loss_epoch`, `val/loss_epoch`, `train/learning_rate`, `train/data_time_avg`
+- **Scalars**: `train/loss_step`, `train/loss_epoch`, `val/loss_epoch`, `train/learning_rate`
 - **Images**: predicted vs ground-truth trajectory plots (every 500 steps for training, every epoch for validation)
 - **Text**: model, training, and CLI configs
 
