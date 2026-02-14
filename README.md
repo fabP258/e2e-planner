@@ -23,13 +23,15 @@ NVIDIA PhysicalAI-Autonomous-Vehicles dataset. Specify which chunks to use via
 `chunk_ids` -- data is downloaded automatically on first use and cached by the
 HuggingFace Hub.
 
-To verify the dataset setup:
+The dataset requires a HuggingFace access token. Either log in via
+`huggingface-cli login`, or set the token as an environment variable:
 
 ```bash
-python test_dataset.py
+export HF_TOKEN=<your-token>
 ```
 
-This loads chunk 0 and saves sample visualizations to `test_dataset_samples/`.
+You can create a token at https://huggingface.co/settings/tokens (read-only
+access is sufficient).
 
 ## Training
 

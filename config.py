@@ -88,6 +88,11 @@ class TrainingConfig:
     near_term_weight: float = 2.0
     near_term_points: int = 6  # First 6 points get higher weight
 
+    # Component-wise loss normalization (equalize x/y contribution)
+    normalize_loss_components: bool = True
+    trajectory_x_std: float = 8.4239
+    trajectory_y_std: float = 0.6838
+
     # Checkpointing
     checkpoint_dir: str = "checkpoints"
     save_every: int = 10

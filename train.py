@@ -95,6 +95,16 @@ def create_weighted_loss(config: TrainingConfig):
         # Compute per-point MSE
         mse = (pred - target) ** 2  # [B, num_points, 2]
 
+        if config.normalize_loss_components:
+            # Weight x and y by 1/std^2, then normalize so weights sum to 2
+            inv_var_x = 1.0 / (config.trajectory_x_std ** 2)
+            inv_var_y = 1.0 / (config.trajectory_y_std ** 2)
+            total = inv_var_x + inv_var_y
+            w_x = inv_var_x / total * 2.0
+            w_y = inv_var_y / total * 2.0
+            comp_weights = torch.tensor([w_x, w_y], device=pred.device)
+            mse = mse * comp_weights  # broadcast [B, num_points, 2]
+
         if config.use_weighted_loss:
             # Create weights: higher for near-term points
             num_points = pred.shape[1]
@@ -127,6 +137,9 @@ def train_one_epoch(
     """Train for one epoch. Returns (avg_loss, global_step)."""
     model.train()
     total_loss = 0.0
+    total_mae = 0.0
+    total_mae_x = 0.0
+    total_mae_y = 0.0
     num_batches = 0
 
     loader = tqdm(dataloader, desc=f"Epoch {epoch}", leave=True) if rank == 0 else dataloader
@@ -149,9 +162,22 @@ def train_one_epoch(
         total_loss += loss_value
         num_batches += 1
 
+        # Unweighted MAE in meters (data-independent metric)
+        with torch.no_grad():
+            abs_err = (pred_trajectories - trajectories).abs()
+            mae = abs_err.mean().item()
+            mae_x = abs_err[..., 0].mean().item()
+            mae_y = abs_err[..., 1].mean().item()
+            total_mae += mae
+            total_mae_x += mae_x
+            total_mae_y += mae_y
+
         if rank == 0 and writer is not None:
-            # TensorBoard: per-step loss
+            # TensorBoard: per-step metrics
             writer.add_scalar("train/loss_step", loss_value, global_step)
+            writer.add_scalar("train/mae_step", mae, global_step)
+            writer.add_scalar("train/mae_x_step", mae_x, global_step)
+            writer.add_scalar("train/mae_y_step", mae_y, global_step)
 
             # TensorBoard: trajectory visualizations
             if (
@@ -172,15 +198,21 @@ def train_one_epoch(
             )
 
     avg_loss = total_loss / num_batches
+    avg_mae = total_mae / num_batches
+    avg_mae_x = total_mae_x / num_batches
+    avg_mae_y = total_mae_y / num_batches
 
-    # Average loss across all GPUs so the logged value reflects the full dataset
+    # Average metrics across all GPUs so the logged values reflect the full dataset
     if dist.is_initialized():
-        loss_tensor = torch.tensor(avg_loss, device=device)
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-        avg_loss = loss_tensor.item()
+        metrics = torch.tensor([avg_loss, avg_mae, avg_mae_x, avg_mae_y], device=device)
+        dist.all_reduce(metrics, op=dist.ReduceOp.AVG)
+        avg_loss, avg_mae, avg_mae_x, avg_mae_y = metrics.tolist()
 
     if rank == 0 and writer is not None:
         writer.add_scalar("train/loss_epoch", avg_loss, epoch)
+        writer.add_scalar("train/mae", avg_mae, epoch)
+        writer.add_scalar("train/mae_x", avg_mae_x, epoch)
+        writer.add_scalar("train/mae_y", avg_mae_y, epoch)
 
     return avg_loss, global_step
 
@@ -198,6 +230,9 @@ def validate(
     """Validate the model."""
     model.eval()
     total_loss = 0.0
+    total_mae = 0.0
+    total_mae_x = 0.0
+    total_mae_y = 0.0
     num_batches = 0
     logged_images = False
 
@@ -212,6 +247,12 @@ def validate(
             total_loss += loss.item()
             num_batches += 1
 
+            # Unweighted MAE in meters
+            abs_err = (pred_trajectories - trajectories).abs()
+            total_mae += abs_err.mean().item()
+            total_mae_x += abs_err[..., 0].mean().item()
+            total_mae_y += abs_err[..., 1].mean().item()
+
             # Log trajectory visualizations from first batch
             if rank == 0 and writer is not None and not logged_images:
                 _log_trajectory_images(
@@ -221,14 +262,20 @@ def validate(
                 logged_images = True
 
     avg_loss = total_loss / num_batches
+    avg_mae = total_mae / num_batches
+    avg_mae_x = total_mae_x / num_batches
+    avg_mae_y = total_mae_y / num_batches
 
     if dist.is_initialized():
-        loss_tensor = torch.tensor(avg_loss, device=device)
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-        avg_loss = loss_tensor.item()
+        metrics = torch.tensor([avg_loss, avg_mae, avg_mae_x, avg_mae_y], device=device)
+        dist.all_reduce(metrics, op=dist.ReduceOp.AVG)
+        avg_loss, avg_mae, avg_mae_x, avg_mae_y = metrics.tolist()
 
     if rank == 0 and writer is not None:
         writer.add_scalar("val/loss_epoch", avg_loss, epoch)
+        writer.add_scalar("val/mae", avg_mae, epoch)
+        writer.add_scalar("val/mae_x", avg_mae_x, epoch)
+        writer.add_scalar("val/mae_y", avg_mae_y, epoch)
     return avg_loss
 
 
