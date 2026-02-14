@@ -318,12 +318,24 @@ def load_checkpoint(
     return checkpoint["epoch"] + 1, global_step
 
 
+def _parse_chunk_ids(values: list[str]) -> list[int]:
+    """Parse chunk ID arguments supporting ranges (e.g. '0-99') and individual IDs."""
+    ids = []
+    for v in values:
+        if "-" in v and not v.startswith("-"):
+            start, end = v.split("-", 1)
+            ids.extend(range(int(start), int(end) + 1))
+        else:
+            ids.append(int(v))
+    return sorted(set(ids))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train E2E Planner")
-    parser.add_argument("--chunk-ids", type=int, nargs="+", default=[0],
-                        help="Chunk IDs to use (default: [0])")
-    parser.add_argument("--val-chunk-ids", type=int, nargs="+", default=None,
-                        help="Chunk IDs for validation")
+    parser.add_argument("--chunk-ids", type=str, nargs="+", default=["0"],
+                        help="Chunk IDs: integers and/or ranges, e.g. 0-99 150 200-249")
+    parser.add_argument("--val-chunk-ids", type=str, nargs="+", default=None,
+                        help="Chunk IDs for validation (same range syntax as --chunk-ids)")
     parser.add_argument("--model-size", type=str, default="small",
                         choices=["small", "medium", "large"],
                         help="Model size preset (default: small)")
@@ -335,6 +347,9 @@ def main():
                         help="Path to checkpoint to resume from")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    args.chunk_ids = _parse_chunk_ids(args.chunk_ids)
+    if args.val_chunk_ids is not None:
+        args.val_chunk_ids = _parse_chunk_ids(args.val_chunk_ids)
 
     # --- DDP setup ---
     ddp = _is_ddp()
