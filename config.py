@@ -29,7 +29,8 @@ class ModelConfig:
 
     # Planning head
     planning_hidden_dim: int = 512
-    num_trajectory_points: int = 18
+    num_trajectory_points: int = 40
+    num_hypotheses: int = 5
 
     # CLS token for temporal attention
     use_cls_token: bool = True
@@ -92,6 +93,9 @@ class TrainingConfig:
     normalize_loss_components: bool = True
     trajectory_x_std: float = 8.4239
     trajectory_y_std: float = 0.6838
+
+    # Multi-hypothesis loss balance
+    regression_loss_weight: float = 1.0
 
     # Checkpointing
     checkpoint_dir: str = "checkpoints"

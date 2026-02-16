@@ -63,6 +63,7 @@ def _log_trajectory_images(
     tag_prefix: str,
     images: torch.Tensor,
     pred_trajectories: torch.Tensor,
+    pred_logits: torch.Tensor,
     gt_trajectories: torch.Tensor,
     global_step: int,
     num_images: int,
@@ -74,26 +75,48 @@ def _log_trajectory_images(
     for i in range(n):
         # Use the last frame from the image stack
         last_frame = images[i, -1]  # [C, H, W]
-        fig = plot_trajectory_comparison(last_frame, pred_trajectories[i], gt_trajectories[i])
+        fig = plot_trajectory_comparison(
+            last_frame, pred_trajectories[i], gt_trajectories[i], pred_logits[i],
+        )
         writer.add_figure(f"{tag_prefix}/trajectory_{i}", fig, global_step)
 
 
 def create_weighted_loss(config: TrainingConfig):
     """Create weighted MSE loss that emphasizes near-term trajectory points."""
 
-    def weighted_mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def weighted_mse_loss(logits: torch.Tensor, pred: torch.Tensor, target: torch.Tensor) -> dict:
         """
-        Weighted MSE loss.
+        Winner-takes-all MSE loss with classification loss on logits.
+
+        Only the hypothesis closest to the ground truth (the "winner")
+        contributes to the regression loss. A cross-entropy loss trains
+        the logits to predict which hypothesis wins.
 
         Args:
-            pred: Predicted trajectory [B, num_points, 2]
+            logits: Predicted logits [B, num_hypotheses]
+            pred: Predicted trajectory [B, num_hypotheses, num_points, 2]
             target: Ground truth trajectory [B, num_points, 2]
 
         Returns:
-            Scalar loss value
+            Dict with keys: loss, regression_loss, classification_loss,
+            mae, mae_x, mae_y, winner_pred
         """
-        # Compute per-point MSE
-        mse = (pred - target) ** 2  # [B, num_points, 2]
+        # --- Winner-takes-all: find best hypothesis per sample ---
+        # [B, num_hypotheses, num_points, 2]
+        per_hyp_mse = (pred - target.unsqueeze(1)) ** 2
+        # Average over points and (x,y) to get per-hypothesis error [B, num_hypotheses]
+        per_hyp_error = per_hyp_mse.mean(dim=(-2, -1))
+        winner_idx = per_hyp_error.argmin(dim=1)  # [B]
+
+        # Extract winner hypothesis: [B, num_points, 2]
+        idx = winner_idx[:, None, None, None].expand(-1, 1, pred.shape[2], pred.shape[3])
+        winner_pred = pred.gather(1, idx).squeeze(1)
+
+        # --- Unweighted MAE on winner (data-independent metric) ---
+        abs_err = (winner_pred - target).abs()  # [B, num_points, 2]
+
+        # --- Regression loss on winner only ---
+        mse = (winner_pred - target) ** 2  # [B, num_points, 2]
 
         if config.normalize_loss_components:
             # Weight x and y by 1/std^2, then normalize so weights sum to 2
@@ -107,7 +130,7 @@ def create_weighted_loss(config: TrainingConfig):
 
         if config.use_weighted_loss:
             # Create weights: higher for near-term points
-            num_points = pred.shape[1]
+            num_points = winner_pred.shape[1]
             weights = torch.ones(num_points, device=pred.device)
             weights[:config.near_term_points] = config.near_term_weight
 
@@ -117,7 +140,22 @@ def create_weighted_loss(config: TrainingConfig):
             # Apply weights
             mse = mse * weights.view(1, -1, 1)
 
-        return mse.mean()
+        regression_loss = mse.mean()
+
+        # --- Classification loss: teach logits to predict the winner ---
+        classification_loss = nn.functional.cross_entropy(logits, winner_idx)
+
+        loss = config.regression_loss_weight * regression_loss + classification_loss
+
+        return {
+            "loss": loss,
+            "regression_loss": regression_loss,
+            "classification_loss": classification_loss,
+            "mae": abs_err.mean().item(),
+            "mae_x": abs_err[..., 0].mean().item(),
+            "mae_y": abs_err[..., 1].mean().item(),
+            "winner_pred": winner_pred,
+        }
 
     return weighted_mse_loss
 
@@ -137,6 +175,8 @@ def train_one_epoch(
     """Train for one epoch. Returns (avg_loss, global_step)."""
     model.train()
     total_loss = 0.0
+    total_reg_loss = 0.0
+    total_cls_loss = 0.0
     total_mae = 0.0
     total_mae_x = 0.0
     total_mae_y = 0.0
@@ -149,32 +189,35 @@ def train_one_epoch(
 
         # Forward pass
         optimizer.zero_grad()
-        pred_trajectories = model(images)
+        pred_logits, pred_trajectories = model(images)
 
         # Compute loss
-        loss = loss_fn(pred_trajectories, trajectories)
+        loss_dict = loss_fn(pred_logits, pred_trajectories, trajectories)
 
         # Backward pass
-        loss.backward()
+        loss_dict["loss"].backward()
         optimizer.step()
 
-        loss_value = loss.detach().item()
+        loss_value = loss_dict["loss"].detach().item()
+        reg_loss_value = loss_dict["regression_loss"].detach().item()
+        cls_loss_value = loss_dict["classification_loss"].detach().item()
         total_loss += loss_value
+        total_reg_loss += reg_loss_value
+        total_cls_loss += cls_loss_value
         num_batches += 1
 
-        # Unweighted MAE in meters (data-independent metric)
-        with torch.no_grad():
-            abs_err = (pred_trajectories - trajectories).abs()
-            mae = abs_err.mean().item()
-            mae_x = abs_err[..., 0].mean().item()
-            mae_y = abs_err[..., 1].mean().item()
-            total_mae += mae
-            total_mae_x += mae_x
-            total_mae_y += mae_y
+        mae = loss_dict["mae"]
+        mae_x = loss_dict["mae_x"]
+        mae_y = loss_dict["mae_y"]
+        total_mae += mae
+        total_mae_x += mae_x
+        total_mae_y += mae_y
 
         if rank == 0 and writer is not None:
             # TensorBoard: per-step metrics
             writer.add_scalar("train/loss_step", loss_value, global_step)
+            writer.add_scalar("train/regression_loss_step", reg_loss_value, global_step)
+            writer.add_scalar("train/classification_loss_step", cls_loss_value, global_step)
             writer.add_scalar("train/mae_step", mae, global_step)
             writer.add_scalar("train/mae_x_step", mae_x, global_step)
             writer.add_scalar("train/mae_y_step", mae_y, global_step)
@@ -186,7 +229,8 @@ def train_one_epoch(
             ):
                 _log_trajectory_images(
                     writer, "train", images, pred_trajectories.detach(),
-                    trajectories, global_step, train_config.num_logged_images,
+                    pred_logits.detach(), trajectories, global_step,
+                    train_config.num_logged_images,
                 )
 
         global_step += 1
@@ -198,18 +242,25 @@ def train_one_epoch(
             )
 
     avg_loss = total_loss / num_batches
+    avg_reg_loss = total_reg_loss / num_batches
+    avg_cls_loss = total_cls_loss / num_batches
     avg_mae = total_mae / num_batches
     avg_mae_x = total_mae_x / num_batches
     avg_mae_y = total_mae_y / num_batches
 
     # Average metrics across all GPUs so the logged values reflect the full dataset
     if dist.is_initialized():
-        metrics = torch.tensor([avg_loss, avg_mae, avg_mae_x, avg_mae_y], device=device)
+        metrics = torch.tensor(
+            [avg_loss, avg_reg_loss, avg_cls_loss, avg_mae, avg_mae_x, avg_mae_y],
+            device=device,
+        )
         dist.all_reduce(metrics, op=dist.ReduceOp.AVG)
-        avg_loss, avg_mae, avg_mae_x, avg_mae_y = metrics.tolist()
+        avg_loss, avg_reg_loss, avg_cls_loss, avg_mae, avg_mae_x, avg_mae_y = metrics.tolist()
 
     if rank == 0 and writer is not None:
         writer.add_scalar("train/loss_epoch", avg_loss, epoch)
+        writer.add_scalar("train/regression_loss_epoch", avg_reg_loss, epoch)
+        writer.add_scalar("train/classification_loss_epoch", avg_cls_loss, epoch)
         writer.add_scalar("train/mae", avg_mae, epoch)
         writer.add_scalar("train/mae_x", avg_mae_x, epoch)
         writer.add_scalar("train/mae_y", avg_mae_y, epoch)
@@ -241,23 +292,22 @@ def validate(
             images = images.to(device)
             trajectories = trajectories.to(device)
 
-            pred_trajectories = model(images)
-            loss = loss_fn(pred_trajectories, trajectories)
+            pred_logits, pred_trajectories = model(images)
+            loss_dict = loss_fn(pred_logits, pred_trajectories, trajectories)
 
-            total_loss += loss.item()
+            total_loss += loss_dict["loss"].item()
             num_batches += 1
 
-            # Unweighted MAE in meters
-            abs_err = (pred_trajectories - trajectories).abs()
-            total_mae += abs_err.mean().item()
-            total_mae_x += abs_err[..., 0].mean().item()
-            total_mae_y += abs_err[..., 1].mean().item()
+            total_mae += loss_dict["mae"]
+            total_mae_x += loss_dict["mae_x"]
+            total_mae_y += loss_dict["mae_y"]
 
             # Log trajectory visualizations from first batch
             if rank == 0 and writer is not None and not logged_images:
                 _log_trajectory_images(
                     writer, "val", images, pred_trajectories,
-                    trajectories, epoch, train_config.num_logged_images,
+                    pred_logits, trajectories, epoch,
+                    train_config.num_logged_images,
                 )
                 logged_images = True
 
@@ -380,6 +430,14 @@ def main():
     model = model.to(device)
     if rank == 0:
         print(f"Model parameters: {model.count_parameters():,}")
+        for name, module in [
+            ("  Patch embedding", model.patch_embed),
+            ("  Spatial encoder", model.spatial_encoder),
+            ("  Temporal encoder", model.temporal_encoder),
+            ("  Planning head", model.planning_head),
+        ]:
+            n = sum(p.numel() for p in module.parameters() if p.requires_grad)
+            print(f"{name}: {n:,}")
 
     if ddp:
         model = DDP(model, device_ids=[local_rank])
