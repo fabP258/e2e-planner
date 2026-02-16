@@ -96,7 +96,7 @@ class NvidiaDriveDataset(Dataset):
     def _index_clips(self, clip_ids: List[str]):
         """Open each clip once to get frame timestamps and build sample index."""
         input_span = self.frame_skip * (self.num_frames - 1)
-        future_duration_us = int(self.trajectory_dt * self.num_trajectory_points * 1e6)
+        future_duration_us = int(self.trajectory_dt * (self.num_trajectory_points - 1) * 1e6)
 
         for clip_id in clip_ids:
             try:
@@ -187,9 +187,11 @@ class NvidiaDriveDataset(Dataset):
         ref_ts = int(timestamps[frame_indices[-1]])
         dt_us = int(self.trajectory_dt * 1e6)
 
-        # Build timestamps: [ref, future_1, future_2, ..., future_N]
+        # Build timestamps: [ref, future_1, future_2, ..., future_{N-1}]
+        # The reference point (origin) counts as the first of num_trajectory_points
+        num_future = self.num_trajectory_points - 1
         all_ts = np.array(
-            [ref_ts] + [ref_ts + (i + 1) * dt_us for i in range(self.num_trajectory_points)]
+            [ref_ts] + [ref_ts + (i + 1) * dt_us for i in range(num_future)]
         )
 
         # Batch-interpolate all poses at once
@@ -197,15 +199,15 @@ class NvidiaDriveDataset(Dataset):
         all_pos = all_states.pose.translation  # (N+1, 3)
         all_rot = all_states.pose.rotation     # Rotation with N+1 elements
 
-        # Transform future positions into the reference frame's local coordinates
+        # Transform all positions (including reference) into the reference frame's local coordinates
         ref_pos = all_pos[0]            # (3,)
         ref_rot_inv = all_rot[0].inv()  # single Rotation
-        future_pos = all_pos[1:]        # (N, 3)
 
-        delta = future_pos - ref_pos    # (N, 3)
-        local = ref_rot_inv.apply(delta)  # (N, 3)
+        delta = all_pos - ref_pos       # (N+1, 3)
+        local = ref_rot_inv.apply(delta)  # (N+1, 3)
 
         # Take (x=forward, y=left) and discard z
+        # First point is the reference frame origin (0, 0)
         trajectory = torch.from_numpy(local[:, :2].astype(np.float32))
 
         return trajectory
