@@ -104,6 +104,16 @@ def create_weighted_loss(config: TrainingConfig):
         # --- Winner-takes-all: find best hypothesis per sample ---
         # [B, num_hypotheses, num_points, 2]
         per_hyp_mse = (pred - target.unsqueeze(1)) ** 2
+
+        if config.normalize_loss_components:
+            inv_var_x = 1.0 / (config.trajectory_x_std ** 2)
+            inv_var_y = 1.0 / (config.trajectory_y_std ** 2)
+            total = inv_var_x + inv_var_y
+            w_x = inv_var_x / total * 2.0
+            w_y = inv_var_y / total * 2.0
+            comp_weights = torch.tensor([w_x, w_y], device=pred.device)
+            per_hyp_mse = per_hyp_mse * comp_weights  # broadcast [B, num_hypotheses, num_points, 2]
+
         # Average over points and (x,y) to get per-hypothesis error [B, num_hypotheses]
         per_hyp_error = per_hyp_mse.mean(dim=(-2, -1))
         winner_idx = per_hyp_error.argmin(dim=1)  # [B]
@@ -119,13 +129,6 @@ def create_weighted_loss(config: TrainingConfig):
         mse = (winner_pred - target) ** 2  # [B, num_points, 2]
 
         if config.normalize_loss_components:
-            # Weight x and y by 1/std^2, then normalize so weights sum to 2
-            inv_var_x = 1.0 / (config.trajectory_x_std ** 2)
-            inv_var_y = 1.0 / (config.trajectory_y_std ** 2)
-            total = inv_var_x + inv_var_y
-            w_x = inv_var_x / total * 2.0
-            w_y = inv_var_y / total * 2.0
-            comp_weights = torch.tensor([w_x, w_y], device=pred.device)
             mse = mse * comp_weights  # broadcast [B, num_points, 2]
 
         if config.use_weighted_loss:
