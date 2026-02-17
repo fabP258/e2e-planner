@@ -38,6 +38,7 @@ class E2EPlanner(nn.Module):
         temporal_dropout: float = 0.1,
         planning_hidden_dim: int = 512,
         num_trajectory_points: int = 18,
+        num_hypotheses: int = 5,
         use_cls_token: bool = True,
     ):
         super().__init__()
@@ -81,6 +82,7 @@ class E2EPlanner(nn.Module):
             embed_dim=embed_dim,
             hidden_dim=planning_hidden_dim,
             num_trajectory_points=num_trajectory_points,
+            num_hypotheses=num_hypotheses,
             dropout=temporal_dropout,
         )
 
@@ -92,7 +94,9 @@ class E2EPlanner(nn.Module):
             x: Input images of shape [B, num_frames, C, H, W]
 
         Returns:
-            Trajectory predictions of shape [B, num_points, 2]
+            Tuple of (logits, trajectories):
+                logits: [B, num_hypotheses]
+                trajectories: [B, num_hypotheses, num_points, 2]
         """
         B, T, C, H, W = x.shape
         assert T == self.num_frames, f"Expected {self.num_frames} frames, got {T}"
@@ -114,14 +118,15 @@ class E2EPlanner(nn.Module):
         # Temporal encoding: [B, T, N, D] -> [B, D]
         x = self.temporal_encoder(x, return_sequence=False)
 
-        # Planning head: [B, D] -> [B, num_points, 2]
-        trajectory = self.planning_head(x)
+        # Planning head: [B, D] -> ([B, H], [B, H, num_points, 2])
+        logits, trajectory = self.planning_head(x)
 
-        return trajectory
+        return logits, trajectory
 
     @classmethod
     def from_config(cls, config) -> "E2EPlanner":
         """Create model from config object."""
+        # TODO: can we simply use **config?
         return cls(
             num_frames=config.num_frames,
             image_height=config.image_height,
@@ -139,6 +144,7 @@ class E2EPlanner(nn.Module):
             temporal_dropout=config.temporal_dropout,
             planning_hidden_dim=config.planning_hidden_dim,
             num_trajectory_points=config.num_trajectory_points,
+            num_hypotheses=config.num_hypotheses,
             use_cls_token=config.use_cls_token,
         )
 
